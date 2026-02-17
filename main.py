@@ -31,6 +31,10 @@ def get_database_schema():
     """
     try:
         conn = psycopg.connect(**DB_CONFIG)
+        # Set connection to read-only mode
+        with conn.cursor() as cur:
+            cur.execute("SET default_transaction_read_only = ON;")
+
         cursor = conn.cursor()
 
         # Get all tables and their columns
@@ -76,19 +80,21 @@ def generate_sql(question, schema):
     """
     Use OpenAI's GPT to generate SQL based on the user's natural language question.
     """
-    prompt = f"""Given the following database schema, generate a SQL query to answer the user's question.
+    prompt = f"""Given the following database schema, generate a Postgres SQL query to answer the user's question.
 
 {schema}
 
-Return ONLY the SQL query, with no additional text or markdown formatting.
-Make sure that we only use select statements. Never edit tables or insert data.
+IMPORTANT SECURITY RULES:
+- ONLY generate SELECT queries
+- NEVER generate INSERT, UPDATE, DELETE, DROP, ALTER, or any data-modifying statements
+- Return ONLY the Postgres SQL query, with no additional text or markdown formatting.
 
 User's Question: {question}
 
 SQL Query:"""
 
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=500,
@@ -98,15 +104,61 @@ SQL Query:"""
     return sql_query
 
 
+def clean_sql_query(sql_query):
+    """
+    Clean SQL query by removing markdown formatting and extra whitespace.
+    Handles code blocks like ```sql ... ``` and returns clean SQL.
+    """
+    query = sql_query.strip()
+
+    # Remove markdown code blocks (```sql ... ``` or ``` ... ```)
+    if query.startswith("```"):
+        # Remove opening ```sql or ```
+        query = query.lstrip("`")
+        # Remove language identifier if present (e.g., 'sql')
+        if query.startswith("sql"):
+            query = query[3:]
+        query = query.lstrip()
+        # Remove closing ```
+        query = query.rstrip("`").strip()
+
+    return query
+
+
+def validate_query(sql_query):
+    """
+    Validate that the query is a SELECT query to prevent data modification.
+    Returns True if valid (SELECT query), False otherwise.
+    """
+    cleaned_query = clean_sql_query(sql_query)
+    query_upper = cleaned_query.strip().upper()
+    if not query_upper.startswith("SELECT"):
+        return False
+    return True
+
+
 def execute_query(sql_query):
     """
     Execute a SQL query against the database and return the results.
+    Only SELECT queries are allowed.
     """
+    # Clean the SQL query (remove markdown formatting)
+    cleaned_sql = clean_sql_query(sql_query)
+
+    # Validate that this is a SELECT query
+    if not validate_query(cleaned_sql):
+        print(f"Error: Only SELECT queries are allowed. Your query: {cleaned_sql}")
+        return None, None
+
     try:
         conn = psycopg.connect(**DB_CONFIG)
+        # Set connection to read-only mode
+        with conn.cursor() as cur:
+            cur.execute("SET default_transaction_read_only = ON;")
+
         cursor = conn.cursor()
 
-        cursor.execute(sql_query)
+        cursor.execute(cleaned_sql)
 
         # Check if it's a SELECT query (returns results)
         if cursor.description:
@@ -180,14 +232,15 @@ def process_question(question):
     # Step 2: Generate SQL from question
     print("[2/4] Generating SQL query from your question...")
     sql_query = generate_sql(question, schema)
-    print(f"Generated SQL: {sql_query}\n")
+    cleaned_sql = clean_sql_query(sql_query)
+    print(f"Generated SQL: {cleaned_sql}\n")
 
     # Step 3: Execute query
     print("[3/4] Executing query...")
     columns, results = execute_query(sql_query)
 
     if columns is None:
-        print("Error: Could not execute the query.")
+        print("Error: Could not execute the query. Only SELECT queries are allowed.")
         return
 
     results_str = format_results(columns, results)
