@@ -1,0 +1,6 @@
+How many students were helped longer than 15 minutes?
+What is the name of the sutudent with the most help requests?
+How many students were helped in 2026?
+What TA has helped the most students?
+What is the average wait time to be helped?
+What is the most common question, if any?
