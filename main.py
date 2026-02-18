@@ -76,13 +76,64 @@ def get_database_schema():
         sys.exit(1)
 
 
-def generate_sql(question, schema):
+def get_two_shot_examples(schema):
+    """
+    Generate two domain-specific example Q&A pairs to guide SQL generation.
+    These examples help GPT understand the database structure better (two-shot learning).
+    For the TA queue system, we provide realistic examples showing joins and aggregations.
+    """
+    # Check if this is the TA queue database by looking for key tables
+    has_student_request = "student_request" in schema.lower()
+    has_ta = "ta" in schema.lower()
+    has_person = "person" in schema.lower()
+
+    examples = "\nEXAMPLES (for reference on how to query this database):\n"
+
+    if has_student_request and has_ta and has_person:
+        # This is the TA queue system - provide domain-specific examples
+        examples += "\nExample 1:"
+        examples += "\nQuestion: How many students are waiting for help?"
+        examples += "\nSQL: SELECT COUNT(*) as waiting_count FROM student_request sr WHERE NOT EXISTS (SELECT 1 FROM ta_response tr WHERE tr.student_request = sr.id);"
+
+        examples += "\nExample 2:"
+        examples += "\nQuestion: Show me the names of active TAs"
+        examples += "\nSQL: SELECT p.first_name, p.last_name FROM person p JOIN ta t ON p.byu_id = t.byu_id WHERE t.active_status = TRUE;"
+    else:
+        # Generic fallback for unknown databases
+        tables = []
+        for line in schema.split("\n"):
+            if line.startswith("Table:"):
+                tables.append(line.replace("Table: ", "").strip())
+
+        if tables:
+            examples += "\nExample 1:"
+            examples += f"\nQuestion: Show all records from {tables[0]}"
+            examples += f"\nSQL: SELECT * FROM {tables[0]} LIMIT 10;"
+
+            if len(tables) > 1:
+                examples += "\nExample 2:"
+                examples += f"\nQuestion: Count records in {tables[0]}"
+                examples += f"\nSQL: SELECT COUNT(*) as total FROM {tables[0]};"
+            else:
+                examples += "\nExample 2:"
+                examples += f"\nQuestion: How many records are in {tables[0]}?"
+                examples += f"\nSQL: SELECT COUNT(*) as record_count FROM {tables[0]};"
+
+    return examples
+
+
+def generate_sql(question, schema, use_two_shot=False):
     """
     Use OpenAI's GPT to generate SQL based on the user's natural language question.
+    If use_two_shot is True, includes domain-specific examples to guide the model.
     """
+    examples_section = ""
+    if use_two_shot:
+        examples_section = get_two_shot_examples(schema)
+
     prompt = f"""Given the following database schema, generate a Postgres SQL query to answer the user's question.
 
-{schema}
+{schema}{examples_section}
 
 IMPORTANT SECURITY RULES:
 - ONLY generate SELECT queries
@@ -217,12 +268,15 @@ Answer:"""
     return answer
 
 
-def process_question(question):
+def process_question(question, use_two_shot=False):
     """
     Main function to process a user's question through the entire pipeline.
+    If use_two_shot is True, uses two-shot prompting for better SQL generation.
     """
     print("\n" + "=" * 60)
     print(f"Question: {question}")
+    if use_two_shot:
+        print("[Mode: Two-Shot Learning]")
     print("=" * 60)
 
     # Step 1: Get database schema
@@ -231,7 +285,7 @@ def process_question(question):
 
     # Step 2: Generate SQL from question
     print("[2/4] Generating SQL query from your question...")
-    sql_query = generate_sql(question, schema)
+    sql_query = generate_sql(question, schema, use_two_shot=use_two_shot)
     cleaned_sql = clean_sql_query(sql_query)
     print(f"Generated SQL: {cleaned_sql}\n")
 
@@ -258,6 +312,7 @@ def process_question(question):
 def main():
     """
     Main entry point for the application.
+    Supports zero-shot (default) and two-shot prompting modes.
     """
     print("Natural Language Database Query Interface")
     print("=" * 60)
@@ -274,12 +329,20 @@ def main():
         print("Error: Database credentials not found. Please set them in your .env file.")
         sys.exit(1)
 
-    if len(sys.argv) > 1:
+    # Check for two-shot flag
+    use_two_shot = "--two-shot" in sys.argv or "-2" in sys.argv
+
+    # Remove flags from argv for question processing
+    filtered_argv = [arg for arg in sys.argv[1:] if arg not in ["--two-shot", "-2"]]
+
+    if filtered_argv:
         # Process command-line argument as a question
-        question = " ".join(sys.argv[1:])
-        process_question(question)
+        question = " ".join(filtered_argv)
+        process_question(question, use_two_shot=use_two_shot)
     else:
         # Interactive mode
+        if use_two_shot:
+            print("[Two-Shot Mode Enabled]")
         print("Type 'exit' or 'quit' to exit.\n")
         while True:
             try:
@@ -290,7 +353,7 @@ def main():
                 if not question:
                     print("Please enter a valid question.")
                     continue
-                process_question(question)
+                process_question(question, use_two_shot=use_two_shot)
             except KeyboardInterrupt:
                 print("\n\nGoodbye!")
                 break
